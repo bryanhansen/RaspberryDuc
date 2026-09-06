@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RaspberryDuc
+Comment=Ducati Scrambler OBD-II diagnostic utility
+Exec=/usr/bin/python3 /home/pi/RaspberryDuc/run.py
+Path=/home/pi/RaspberryDuc
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Utility;
+StartupNotify=false
