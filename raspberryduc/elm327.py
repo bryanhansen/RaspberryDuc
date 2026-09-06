@@ -117,6 +117,38 @@ class Elm327:
         self._ser.flush()
         return self._read_until_prompt(wait)
 
+    def sniff_can(self, can_id: int, timeout: float = 0.45) -> str:
+        """Capture a short burst of traffic for one 11-bit CAN ID, then restore headers-off."""
+        cid = f"{can_id:03X}"
+        self.command("ATH1", timeout=0.4)
+        self.command(f"ATCRA{cid}", timeout=0.4)
+        if not self._ser:
+            raise ElmError("Adapter is not open")
+        self._ser.reset_input_buffer()
+        self._ser.write(b"ATMA\r")
+        self._ser.flush()
+        deadline = time.time() + timeout
+        buf = bytearray()
+        self._ser.timeout = 0.05
+        while time.time() < deadline:
+            chunk = self._ser.read(128)
+            if chunk:
+                buf.extend(chunk)
+                if b"\r" in buf and len(buf) > 6:
+                    break
+        try:
+            self._ser.write(b"\r")
+            self._ser.flush()
+        except Exception:
+            pass
+        leftover = self._read_until_prompt(0.5)
+        try:
+            self.command("ATH0", timeout=0.4)
+        except Exception:
+            pass
+        text = buf.decode("ascii", "replace") + "\n" + leftover
+        return text.replace("\x00", "")
+
     def _read_until_prompt(self, timeout: float) -> str:
         assert self._ser is not None
         deadline = time.time() + timeout

@@ -7,9 +7,18 @@ Requirements:
 [R3 Communication protocol]: The app shall communicate to the vehicle using the ISO 11898 / ISO 15765-4 (OBD-II) protocol
 [R4 ECU Target]: The app shall support the Continental M3C ECU for the 2015 Ducati Scrambler Icon 800 cc motorcycle
 [R5 Status bar]: The app shall always display a status bar a the bottom of the screen with the ELM327 connection status, COM port ID, and a button to connect or disconnect
-[R6 Tabbed GUI] The GUI shall have 2 tabs: Main and About
+[R6 Tabbed GUI] The GUI shall have 4 tabs: Main, Service, Live, and About
 [R7 Main Tab] Upon an successful connection the main tab will display the vehicle VIN read from the ECU, a list of any active fault codes
+[R7.1 Main Tab no vehicle] If the ELM327 connection is successful, but no VIN can be retrieved the main tab shall indicate no vehicle detected.
 [R8 About Tab] The about tab shall display the software version, and a copyright notice attributed to Bryan Hansen and GPL license information
+[R9 Live tab] The realtime tab shall have 4 panels for the display of realtime ECU values, an single option for update frequency with a default of 1 second, and a button to start and stop realtime updates.
+[R9.1 Live update panels] Each panel will allow the user to select one of the available values (or none) to display and an area for the associated numeric value labeled with the appropriate units.
+[R9.2 Live tab enable] When a vehicle is successfully connected, the Live tab shall allow the user to start updates and indicate that realtime updates are active.
+[R9.2 Live tab updates] When realtime updates are enabled, the app shall read the specified values from the ECU at the specified frequency and update the associated values in each of the 4 panels.
+[R9.3 Live tab disable] When the user presses the button to stop realtime updates the app shall stop updating values from the ECU, indicate that updates are inactive, and continue to display the last measured values.
+[R10 Service tab] When a vehicle is successful connected, the summary tab shall display the status of Oil service indicator, Desmo service indicator, OEM heated grip activation status, and the service interval read from the ECU.
+[R10.1 Service tab no vehicle] If the ELM327 connection is successful, but communication with the ECU cannot be established, the service tab shall indicate no vehicle detected.
+
 
 Constraints:
 [C1]: The app will be written in python

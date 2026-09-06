@@ -1,6 +1,8 @@
 """Application identity and About-tab legal notices."""
 
-__version__ = "0.1.0"
+from pathlib import Path
+
+__version__ = "0.4.1"
 APP_NAME = "RaspberryDuc"
 APP_TITLE = "Ducati Scrambler OBD-II"
 COPYRIGHT = "Copyright (C) 2026 Bryan Hansen"
@@ -23,3 +25,15 @@ You should have received a copy of the GNU General
 Public License along with this program. If not, see
 <https://www.gnu.org/licenses/>.
 """
+
+
+def license_text() -> str:
+    """Full About-tab license body, including the LICENSE file when present."""
+    chunks = [COPYRIGHT, LICENSE_NAME, "", GPL_NOTICE.strip(), ""]
+    license_path = Path(__file__).resolve().parent.parent / "LICENSE"
+    try:
+        chunks.append(license_path.read_text(encoding="utf-8"))
+    except OSError:
+        chunks.append("The complete GNU GPLv3 text is available at:")
+        chunks.append("https://www.gnu.org/licenses/gpl-3.0.txt")
+    return "\n".join(chunks).strip() + "\n"

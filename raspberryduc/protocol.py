@@ -10,6 +10,18 @@ from typing import List, Optional, Sequence, Tuple
 from raspberryduc.detect import SerialCandidate, list_candidates
 from raspberryduc.dtc import FaultCode, decode_mode03, decode_uds_dtc, unique_codes
 from raspberryduc.elm327 import Elm327, ElmError, parse_hex_bytes, response_failed
+from raspberryduc.live import LIVE_PARAMS, NONE_KEY, can_payload, mode01_payload, parse_atrv
+from raspberryduc.service import (
+    ServiceSnapshot,
+    grips_from_can_280,
+    indicator_from_remaining,
+    indicators_from_can_201,
+    option_from_flag,
+    parse_option_flag,
+    parse_packed_service,
+    parse_remaining,
+    OptionState,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -38,6 +50,7 @@ class VehicleSnapshot:
     protocol: str = ""
     ecu_ok: bool = False
     notes: str = ""
+    service: ServiceSnapshot = field(default_factory=ServiceSnapshot)
 
 
 @dataclass
@@ -56,10 +69,17 @@ class M3CSession:
         self.elm = Elm327()
         self.info: Optional[ConnectionInfo] = None
         self.snapshot = VehicleSnapshot()
+        self._diag_tx = "7E0"
+        self._diag_rx = "7E8"
 
     @property
     def connected(self) -> bool:
         return self.elm.connected
+
+    @property
+    def vehicle_connected(self) -> bool:
+        """True when a VIN was read from the ECU (R7.1 / R9.2)."""
+        return bool(self.snapshot.vin)
 
     def connect(self, preferred_port: Optional[str] = None) -> ConnectionInfo:
         last_error = "No USB ELM327 adapter found"
@@ -107,12 +127,35 @@ class M3CSession:
         snap.vin_source = source
         snap.faults = self._read_faults()
         snap.ecu_ok = bool(vin) or bool(snap.faults) or self._ping_ecu()
-        if not snap.ecu_ok:
-            snap.notes = "ELM327 is up, but the M3C ECU did not answer. Ignition ON?"
-        elif not vin:
-            snap.notes = "ECU responded; VIN was not available via 0902 or UDS F190."
+        if not vin:
+            snap.notes = "No vehicle detected."
+        snap.service = self.read_service(vehicle_present=snap.ecu_ok or bool(vin))
         self.snapshot = snap
         return snap
+
+    def read_live(self, key: str) -> Optional[float]:
+        if key == NONE_KEY or key not in LIVE_PARAMS:
+            return None
+        param = LIVE_PARAMS[key]
+        if param.obd_cmd == "ATRV":
+            raw = self.elm.command("ATRV", timeout=0.6)
+            return parse_atrv(raw)
+        raw = self.elm.command(param.obd_cmd, timeout=0.7)
+        if not response_failed(raw):
+            data = mode01_payload(parse_hex_bytes(raw), param.pid)
+            if data:
+                value = param.decode(data)
+                if value is not None:
+                    return value
+        if param.can_id is not None and param.can_decode is not None:
+            try:
+                sniffed = self.elm.sniff_can(param.can_id)
+                frame = can_payload(sniffed, param.can_id)
+                if frame:
+                    return param.can_decode(frame)
+            except Exception as exc:
+                LOG.debug("CAN sniff %s failed: %s", param.key, exc)
+        return None
 
     def _select_protocol(self) -> str:
         """Prefer a live ISO 15765-4 bus; default to 11-bit 500 kbit/s for the M3C."""
@@ -160,6 +203,7 @@ class M3CSession:
                 raw = self.elm.command("22F190", timeout=4.0)
                 vin = _vin_from_uds(parse_hex_bytes(raw))
                 if vin:
+                    self._diag_tx, self._diag_rx = tx, rx
                     return vin, f"UDS DID F190 @{tx}/{rx}"
             except Exception as exc:
                 LOG.debug("UDS VIN %s failed: %s", tx, exc)
@@ -186,6 +230,7 @@ class M3CSession:
                     continue
                 decoded = decode_uds_dtc(parse_hex_bytes(raw))
                 if decoded:
+                    self._diag_tx, self._diag_rx = tx, rx
                     return unique_codes(decoded)
             except Exception as exc:
                 LOG.debug("UDS DTC %s failed: %s", tx, exc)
@@ -194,6 +239,84 @@ class M3CSession:
     def _address_ecu(self, tx: str, rx: str) -> None:
         self.elm.command(f"ATSH{tx}", timeout=1.0)
         self.elm.command(f"ATCRA{rx}", timeout=1.0)
+
+    def read_service(self, vehicle_present: bool) -> ServiceSnapshot:
+        snap = ServiceSnapshot(vehicle_present=vehicle_present)
+        if not vehicle_present:
+            snap.notes = "No vehicle detected."
+            return snap
+        try:
+            self.elm.command("1003", timeout=0.6)
+        except Exception:
+            pass
+        packed = self._uds_read_did(0xF1A0) or self._uds_read_did(0x0200)
+        if packed:
+            trio = parse_packed_service(packed)
+            if trio:
+                oil_km, desmo_km, interval = trio
+                snap.oil_remaining_km = oil_km
+                snap.desmo_remaining_km = desmo_km
+                snap.interval_km = interval
+                snap.oil = indicator_from_remaining(oil_km)
+                snap.desmo = indicator_from_remaining(desmo_km)
+                snap.source = "UDS packed service DID"
+        oil_data = packed if packed and parse_packed_service(packed) is None else None
+        if oil_data is None and snap.oil_remaining_km is None:
+            oil_data = self._uds_read_did(0xF401) or self._uds_read_did(0x0101)
+        if snap.desmo_remaining_km is None:
+            desmo_data = self._uds_read_did(0xF1A1) or self._uds_read_did(0xF402)
+            if desmo_data:
+                snap.desmo_remaining_km = parse_remaining(desmo_data)
+                snap.desmo = indicator_from_remaining(snap.desmo_remaining_km)
+        if snap.interval_km is None:
+            interval_data = self._uds_read_did(0xF1A2) or self._uds_read_did(0xF400)
+            if interval_data:
+                snap.interval_km = parse_remaining(interval_data)
+        if oil_data:
+            snap.oil_remaining_km = parse_remaining(oil_data)
+            snap.oil = indicator_from_remaining(snap.oil_remaining_km)
+        grips_data = self._uds_read_did(0xF1A3) or self._uds_read_did(0xF010)
+        if grips_data:
+            snap.grips = option_from_flag(parse_option_flag(grips_data))
+        if snap.grips == OptionState.UNKNOWN:
+            try:
+                sniffed = self.elm.sniff_can(0x280)
+                frame = can_payload(sniffed, 0x280)
+                if frame:
+                    snap.grips = option_from_flag(grips_from_can_280(frame))
+            except Exception as exc:
+                LOG.debug("Heated-grip CAN sniff failed: %s", exc)
+        if snap.oil_remaining_km is None and snap.desmo_remaining_km is None:
+            try:
+                sniffed = self.elm.sniff_can(0x201)
+                frame = can_payload(sniffed, 0x201)
+                if frame:
+                    snap.oil, snap.desmo = indicators_from_can_201(frame)
+                    if not snap.source:
+                        snap.source = "CAN 0x201 ECU→dash"
+            except Exception as exc:
+                LOG.debug("Service CAN sniff failed: %s", exc)
+        if snap.source or snap.grips != OptionState.UNKNOWN:
+            if not snap.source:
+                snap.source = "ECU option / service data"
+            return snap
+        snap.notes = "Service data was not available from the ECU."
+        return snap
+
+    def _uds_read_did(self, did: int) -> Optional[bytes]:
+        cmd = f"22{did:04X}"
+        try:
+            self._address_ecu(self._diag_tx, self._diag_rx)
+            raw = self.elm.command(cmd, timeout=0.7)
+            if response_failed(raw):
+                return None
+            payload = parse_hex_bytes(raw)
+            if payload and payload[0] == 0x62:
+                body = payload[3:] if len(payload) >= 3 else payload[1:]
+                return body or None
+        except Exception as exc:
+            LOG.debug("UDS DID %04X failed: %s", did, exc)
+        return None
 
 
 def _vin_from_mode09(payload: bytes) -> str:

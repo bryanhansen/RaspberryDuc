@@ -7,8 +7,10 @@ Python OBD-II diagnostic utility for a **2015 Ducati Scrambler Icon 800** (Conti
 - Autodetects an ELM327 on a USB virtual COM port (`/dev/ttyUSB*`, `/dev/ttyACM*`)
 - Speaks **ISO 11898 / ISO 15765-4** (CAN 11/29-bit, 250/500 kbit/s; M3C defaults to 11-bit 500 kbit/s)
 - Status bar always shows ELM327 state, COM port, and Connect / Disconnect
-- **Main** tab: VIN and active fault codes after a successful connect
-- **About** tab: version, copyright (Bryan Hansen), GPLv3 notice
+- **Main** tab: VIN and active fault codes after a successful connect; shows **No vehicle detected** if the adapter is up but VIN cannot be read
+- **Service** tab: oil and desmo service indicators, heated-grip ECU activation, and service interval
+- **Live** tab: four selectable live value panels, update rate (default 1 s), and Start/Stop
+- **About** tab: version, copyright (Bryan Hansen), scrollable GPLv3 license text
 
 ## Hardware
 
@@ -39,9 +41,9 @@ A desktop launcher is in `scripts/raspberryduc.desktop`. Copy it to `~/.local/sh
 
 ## Protocol notes
 
-The M3C is addressed as a standard ISO 15765-4 diagnostic server (`7E0`/`7E8`, then `7E1`/`7E9`). VIN is requested with OBD Mode 09 PID 02, then UDS DID `F190`. Faults use Mode 03 / 07, then UDS `19 02 FF`.
+The M3C is addressed as a standard ISO 15765-4 diagnostic server (`7E0`/`7E8`, then `7E1`/`7E9`). VIN is requested with OBD Mode 09 PID 02, then UDS DID `F190`. Faults use Mode 03 / 07, then UDS `19 02 FF`. Service status is read with UDS maintenance DIDs, then CAN ID `0x201` (ECU→dash warning bits).
 
-The Scrambler does not always implement passenger-car Mode 01 PIDs. A live adapter with no ECU reply still shows as ELM327 connected; the Main tab reports that the ECU did not answer.
+The Scrambler does not always implement passenger-car Mode 01 PIDs. Realtime values first use ISO 15765-4 Mode 01, then fall back to known M3C CAN frames (RPM, throttle, voltage) when needed. If the ELM327 connects but no VIN is returned, the Main tab shows **No vehicle detected** and Realtime Start stays disabled.
 
 ## License
 
