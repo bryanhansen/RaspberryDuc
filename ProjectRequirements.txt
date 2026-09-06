@@ -19,6 +19,11 @@ Requirements:
 [R10 Service tab] When a vehicle is successful connected, the summary tab shall display the status of Oil service indicator, Desmo service indicator, OEM heated grip activation status, and the service interval read from the ECU.
 [R10.1 Service tab no vehicle] If the ELM327 connection is successful, but communication with the ECU cannot be established, the service tab shall indicate no vehicle detected.
 
+[R20 Logging] The app shall allow logging to be enabled via a configuration file input and when enabled will log details of all transactions between the app and the ECU to aid in debugging and troubleshooting.
+[R20.1 Logging errors] If the log file is missing, the app shall create it automatically.
+[R20.2 Logging connections] The app shall add a log entry for each ELM327 connection and disconnection; The entry for connection will include the connection details (device, baud rate, etc)
+[R20.3 Logging capacity] The app shall maintain up to 5 separate log files where a new log is created each time the app is started and the oldest log is deleted automatically.
+[R20.4 Log file naming] The app shall include the date and time in the log file name in the format YYYY_DD_MM_HH_MM_SS 
 
 Constraints:
 [C1]: The app will be written in python

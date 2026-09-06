@@ -101,6 +101,8 @@ def describe(code: str) -> str:
 
 def decode_mode03(payload: bytes) -> List[FaultCode]:
     """Parse ISO 15031-5 mode $03/$07 CAN payload (SID already stripped)."""
+    if negative_response(payload):
+        return []
     data = _strip_sid(payload, (0x43, 0x47))
     codes: List[FaultCode] = []
     # Skip a leading count byte when the remainder is an odd length.
@@ -117,6 +119,8 @@ def decode_mode03(payload: bytes) -> List[FaultCode]:
 
 def decode_uds_dtc(payload: bytes) -> List[FaultCode]:
     """Parse UDS 0x19 reportDTCByStatusMask (SID 0x59 already optional)."""
+    if negative_response(payload):
+        return []
     data = bytearray(payload)
     if data and data[0] in (0x19, 0x59):
         data = data[1:]
@@ -141,6 +145,11 @@ def decode_uds_dtc(payload: bytes) -> List[FaultCode]:
             )
         )
     return codes
+
+
+def negative_response(payload: bytes) -> bool:
+    """True for ISO 14229 / ISO 15031 negative responses (SID 0x7F)."""
+    return bool(payload) and payload[0] == 0x7F
 
 
 def unique_codes(items: Iterable[FaultCode]) -> List[FaultCode]:

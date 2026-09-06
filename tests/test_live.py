@@ -38,3 +38,16 @@ class LiveDecodeTests(unittest.TestCase):
     def test_can_payload_spaced(self):
         frame = can_payload("100 00 E0 0A 0B B8 04 00 01", 0x100)
         self.assertEqual(frame, bytes.fromhex("00E00A0BB8040001"))
+
+    def test_can_payload_cra_data_only(self):
+        dump = "00000000C8000000\r00000000C8000000\rSTOPPED"
+        frame = can_payload(dump, 0x081)
+        self.assertEqual(frame, bytes.fromhex("00000000C8000000"))
+        self.assertAlmostEqual(decode_scrambler_tps(frame), 100.0)
+
+    def test_can_payload_concat_id(self):
+        frame = can_payload("2010000000000004A81\rSTOPPED", 0x201)
+        self.assertEqual(frame, bytes.fromhex("0000000000004A81"))
+
+    def test_scrambler_tps_byte1(self):
+        self.assertAlmostEqual(decode_scrambler_tps(bytes.fromhex("0001000000000000")), 100.0 / 0xC8)

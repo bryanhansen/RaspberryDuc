@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Dict, List, Optional
 
+from raspberryduc.config import apply_logging, load_config
 from raspberryduc.elm327 import ElmError
 from raspberryduc.live import (
     LIVE_PARAMS,
@@ -970,5 +971,6 @@ class RaspberryDucApp(tk.Tk):
 
 def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    apply_logging(load_config())
     app = RaspberryDucApp()
     app.mainloop()

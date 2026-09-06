@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
@@ -33,10 +34,10 @@ ISO15765_PROTOCOLS: Sequence[Tuple[str, str]] = (
     ("9", "ISO 15765-4 CAN 29-bit 250 kbit/s"),
 )
 
-# Physical diagnostic addresses commonly used on motorcycle ECUs including M3C.
+# Physical diagnostic addresses. The Scrambler M3C answered on 7E1/7E9 first.
 PHYS_ADDRS_11BIT = (
-    ("7E0", "7E8"),
     ("7E1", "7E9"),
+    ("7E0", "7E8"),
 )
 
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
@@ -69,8 +70,10 @@ class M3CSession:
         self.elm = Elm327()
         self.info: Optional[ConnectionInfo] = None
         self.snapshot = VehicleSnapshot()
-        self._diag_tx = "7E0"
-        self._diag_rx = "7E8"
+        self._diag_tx = "7E1"
+        self._diag_rx = "7E9"
+        self._ecu_seen = False
+        self._can_cache: dict = {}
 
     @property
     def connected(self) -> bool:
@@ -104,7 +107,23 @@ class M3CSession:
                     protocol=protocol,
                     description=cand.description,
                 )
+                LOG.info(
+                    "ELM327 connection: device=%s baud=%s adapter=%s protocol=%s description=%s",
+                    self.info.port,
+                    self.info.baudrate,
+                    self.info.adapter_id,
+                    self.info.protocol,
+                    self.info.description or "",
+                )
                 self.snapshot = self.read_vehicle()
+                LOG.info(
+                    "Vehicle snapshot vin=%s source=%s faults=%s ecu_ok=%s notes=%s",
+                    self.snapshot.vin or "(none)",
+                    self.snapshot.vin_source or "(none)",
+                    len(self.snapshot.faults),
+                    self.snapshot.ecu_ok,
+                    self.snapshot.notes or "",
+                )
                 return self.info
             except Exception as exc:
                 last_error = f"{cand.device}: {exc}"
@@ -114,9 +133,23 @@ class M3CSession:
         raise ElmError(last_error)
 
     def disconnect(self) -> None:
+        info = self.info
+        if self.elm.connected or info:
+            if info:
+                LOG.info(
+                    "ELM327 disconnection: device=%s baud=%s adapter=%s protocol=%s",
+                    info.port,
+                    info.baudrate,
+                    info.adapter_id,
+                    info.protocol,
+                )
+            else:
+                LOG.info("ELM327 disconnection: device=%s", self.elm.port_name or "(unknown)")
         self.elm.close()
         self.info = None
         self.snapshot = VehicleSnapshot()
+        self._ecu_seen = False
+        self._can_cache = {}
 
     def read_vehicle(self) -> VehicleSnapshot:
         snap = VehicleSnapshot()
@@ -126,7 +159,7 @@ class M3CSession:
         snap.vin = vin
         snap.vin_source = source
         snap.faults = self._read_faults()
-        snap.ecu_ok = bool(vin) or bool(snap.faults) or self._ping_ecu()
+        snap.ecu_ok = bool(vin) or bool(snap.faults) or self._ecu_seen or self._ping_ecu()
         if not vin:
             snap.notes = "No vehicle detected."
         snap.service = self.read_service(vehicle_present=snap.ecu_ok or bool(vin))
@@ -139,28 +172,44 @@ class M3CSession:
         param = LIVE_PARAMS[key]
         if param.obd_cmd == "ATRV":
             raw = self.elm.command("ATRV", timeout=0.6)
-            return parse_atrv(raw)
-        raw = self.elm.command(param.obd_cmd, timeout=0.7)
-        if not response_failed(raw):
-            data = mode01_payload(parse_hex_bytes(raw), param.pid)
-            if data:
-                value = param.decode(data)
-                if value is not None:
-                    return value
+            volts = parse_atrv(raw)
+            if volts is not None:
+                return volts
+        elif not self._ecu_seen:
+            raw = self.elm.command(param.obd_cmd, timeout=0.5)
+            if not response_failed(raw):
+                data = mode01_payload(parse_hex_bytes(raw), param.pid)
+                if data:
+                    value = param.decode(data)
+                    if value is not None:
+                        return value
         if param.can_id is not None and param.can_decode is not None:
             try:
-                sniffed = self.elm.sniff_can(param.can_id)
-                frame = can_payload(sniffed, param.can_id)
+                frame = self._sniff_frame(param.can_id)
                 if frame:
                     return param.can_decode(frame)
             except Exception as exc:
                 LOG.debug("CAN sniff %s failed: %s", param.key, exc)
         return None
 
+    def _sniff_frame(self, can_id: int) -> Optional[bytes]:
+        now = time.monotonic()
+        hit = self._can_cache.get(can_id)
+        if hit and now - hit[0] < 0.3:
+            return hit[1]
+        sniffed = self.elm.sniff_can(can_id)
+        frame = can_payload(sniffed, can_id)
+        self._can_cache[can_id] = (now, frame)
+        try:
+            self._address_ecu(self._diag_tx, self._diag_rx)
+        except Exception:
+            pass
+        return frame
+
     def _select_protocol(self) -> str:
         """Prefer a live ISO 15765-4 bus; default to 11-bit 500 kbit/s for the M3C."""
         last_error = "protocol select failed"
-        fallback = None
+        fallback: Optional[Tuple[str, str]] = None
         for code, name in ISO15765_PROTOCOLS:
             try:
                 self.elm.configure_iso15765(code)
@@ -168,21 +217,28 @@ class M3CSession:
                 reported = self.elm.protocol_name()
                 label = f"{name} [{reported}]"
                 upper = probe.upper()
-                if "UNABLE TO CONNECT" in upper or "BUS ERROR" in upper:
+                if "UNABLE TO CONNECT" in upper or "BUS ERROR" in upper or "CAN ERROR" in upper:
                     last_error = probe
                     if fallback is None and code == "6":
-                        fallback = label
+                        fallback = (code, label)
                     continue
                 if parse_hex_bytes(probe):
                     LOG.info("Selected live protocol %s", label)
                     return label
                 if fallback is None:
-                    fallback = label
+                    fallback = (code, label)
+                # 500 kbit/s with NO DATA means the bus is present; skip 250 kbit/s.
+                if code in ("6", "7") and "CAN ERROR" not in upper:
+                    break
             except Exception as exc:
                 last_error = str(exc)
         if fallback:
-            LOG.info("Using fallback ISO 15765-4 protocol %s", fallback)
-            return fallback
+            code, label = fallback
+            self.elm.configure_iso15765(code)
+            reported = self.elm.protocol_name()
+            label = f"{label.split('[')[0].strip()} [{reported}]"
+            LOG.info("Using fallback ISO 15765-4 protocol %s", label)
+            return label
         raise ElmError(f"ISO 15765-4 not established: {last_error}")
 
     def _ping_ecu(self) -> bool:
@@ -192,36 +248,78 @@ class M3CSession:
 
     def _read_vin(self) -> Tuple[str, str]:
         # ISO 15031-5 / SAE J1979 Mode 09 PID 02 (VIN)
+        self._ecu_seen = False
         raw = self.elm.command("0902", timeout=4.0)
         vin = _vin_from_mode09(parse_hex_bytes(raw))
+        LOG.debug("VIN Mode 09 raw=%s parsed=%s", _brief(raw), vin or "(none)")
         if vin:
+            self._ecu_seen = True
             return vin, "OBD Mode 09 PID 02"
         # ISO 14229 UDS ReadDataByIdentifier 0xF190 over ISO 15765-4
         for tx, rx in PHYS_ADDRS_11BIT:
             try:
                 self._address_ecu(tx, rx)
-                raw = self.elm.command("22F190", timeout=4.0)
-                vin = _vin_from_uds(parse_hex_bytes(raw))
-                if vin:
+                session = self.elm.command("1003", timeout=1.5)
+                LOG.debug("UDS 1003 @%s raw=%s", tx, _brief(session))
+                self._note_ecu(session)
+                sess_ok = parse_hex_bytes(session)[:1] == b"\x50"
+                if sess_ok:
                     self._diag_tx, self._diag_rx = tx, rx
-                    return vin, f"UDS DID F190 @{tx}/{rx}"
+                # 2-byte KWP2000 reads: 3-byte UDS 22/19 all returned NRC 0x13 on the M3C.
+                for cmd in ("1A90", "1A91"):
+                    if cmd in ("1A90", "1A91"):
+                        payload = self.elm.isotp_request(cmd, timeout=3.0)
+                        raw = payload.hex().upper()
+                        vin = _vin_from_kwp(payload)
+                    else:
+                        raw = self.elm.command(cmd, timeout=4.0)
+                        payload = parse_hex_bytes(raw)
+                        vin = _vin_from_kwp(payload)
+                    self._note_ecu(payload if cmd in ("1A90", "1A91") else raw)
+                    LOG.debug(
+                        "VIN KWP %s @%s raw=%s parsed=%s",
+                        cmd,
+                        tx,
+                        _brief(raw),
+                        vin or "(none)",
+                    )
+                    if vin:
+                        self._diag_tx, self._diag_rx = tx, rx
+                        return vin, f"KWP {cmd} @{tx}/{rx}"
+                if sess_ok:
+                    break
             except Exception as exc:
                 LOG.debug("UDS VIN %s failed: %s", tx, exc)
         return "", ""
 
+    def _note_ecu(self, raw) -> None:
+        data = raw if isinstance(raw, (bytes, bytearray)) else parse_hex_bytes(str(raw))
+        if data and (data[0] == 0x7F or 0x40 <= data[0] <= 0x7E):
+            self._ecu_seen = True
+
     def _read_faults(self) -> List[FaultCode]:
         faults: List[FaultCode] = []
-        # Stored / confirmed DTCs (ISO 15031-5 service 03)
-        raw = self.elm.command("03", timeout=3.0)
-        if not response_failed(raw):
-            faults.extend(decode_mode03(parse_hex_bytes(raw)))
-        # Pending DTCs
-        raw = self.elm.command("07", timeout=3.0)
-        if not response_failed(raw):
-            faults.extend(decode_mode03(parse_hex_bytes(raw)))
+        if self._ecu_seen:
+            try:
+                self._address_ecu(self._diag_tx, self._diag_rx)
+                self.elm.command("1003", timeout=1.0)
+                for cmd in ("1800", "17FF", "13"):
+                    raw = self.elm.command(cmd, timeout=2.5)
+                    self._note_ecu(raw)
+                    payload = parse_hex_bytes(raw)
+                    if payload and payload[:1] != b"\x7f" and not response_failed(raw):
+                        decoded = decode_mode03(payload) or decode_uds_dtc(payload)
+                        if decoded:
+                            return unique_codes(decoded)
+            except Exception as extra:
+                LOG.debug("UDS DTC failed: %s", extra)
+            return unique_codes(faults)
+        raw = self.elm.command("03", timeout=2.0)
+        payload = parse_hex_bytes(raw)
+        if not response_failed(raw) and not (payload and payload[:1] == b"\x7f"):
+            faults.extend(decode_mode03(payload))
         if faults:
             return unique_codes(faults)
-        # UDS ReadDTCInformation reportDTCByStatusMask
         for tx, rx in PHYS_ADDRS_11BIT:
             try:
                 self._address_ecu(tx, rx)
@@ -319,6 +417,35 @@ class M3CSession:
         return None
 
 
+def _nrc_is(raw: str, code: int) -> bool:
+    data = parse_hex_bytes(raw)
+    return len(data) >= 3 and data[0] == 0x7F and data[2] == code
+
+
+def _brief(text: str, limit: int = 240) -> str:
+    compact = " | ".join(line.strip() for line in text.splitlines() if line.strip())
+    if not compact:
+        return "(empty)"
+    if len(compact) > limit:
+        return compact[:limit] + "…"
+    return compact
+
+
+def _vin_from_kwp(payload: bytes) -> str:
+    """ISO 14230 ReadEcuIdentification (1A) / ReadDataByLocalId (21)."""
+    if not payload or payload[0] == 0x7F:
+        return ""
+    data = payload
+    if data[:1] in (b"\x5A", b"\x61"):
+        data = data[1:]
+        if data:
+            data = data[1:]
+    ascii_bytes = bytearray(b for b in data if 32 <= b < 127)
+    text = bytes(ascii_bytes).decode("ascii", "ignore").replace("\x00", "").strip()
+    match = VIN_RE.search(text.replace(" ", ""))
+    return match.group(0) if match else ""
+
+
 def _vin_from_mode09(payload: bytes) -> str:
     if not payload:
         return ""
@@ -343,7 +470,7 @@ def _vin_from_uds(payload: bytes) -> str:
     data = payload
     if data[:1] == b"\x62":
         data = data[1:]
-    if len(data) >= 2 and data[0] == 0xF1 and data[1] == 0x90:
+    if len(data) >= 2:
         data = data[2:]
     text = "".join(chr(b) for b in data if 32 <= b < 127)
     match = VIN_RE.search(text.replace(" ", ""))

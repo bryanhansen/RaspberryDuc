@@ -94,10 +94,28 @@ def decode_fuel_level(data: bytes) -> Optional[float]:
 
 
 def decode_scrambler_tps(frame: bytes) -> Optional[float]:
-    """CAN 0x081 byte0 is 0x00-0xC8 in steps of 2 (~0-100%)."""
+    """CAN 0x081: 0x00-0xC8 is 0-100%. Byte 0, 1, or 4 depending on layout."""
     if not frame:
         return None
-    return min(100.0, frame[0] * 100.0 / 0xC8)
+    for idx in (0, 1, 4):
+        if idx < len(frame) and 0 < frame[idx] <= 0xC8:
+            return min(100.0, frame[idx] * 100.0 / 0xC8)
+    if frame[0] == 0:
+        return 0.0
+    return None
+
+
+def decode_scrambler_coolant(frame: bytes) -> Optional[float]:
+    """Prefer a plausible coolant byte (engine temp, not 12 V / 0xC8 scale)."""
+    if not frame:
+        return None
+    for idx in (0, 1, 2, 5, 6):
+        if idx >= len(frame):
+            continue
+        temp = float(frame[idx] - 40)
+        if -20.0 <= temp <= 130.0 and frame[idx] not in (0x00, 0xFF):
+            return temp
+    return None
 
 
 def decode_scrambler_rpm(frame: bytes) -> Optional[float]:
@@ -127,8 +145,8 @@ def _register(param: LiveParam) -> LiveParam:
 
 _register(LiveParam("rpm", "Engine RPM", "rpm", "010C", 0x0C, decode_rpm, 0x100, decode_scrambler_rpm))
 _register(LiveParam("speed", "Vehicle speed", "km/h", "010D", 0x0D, decode_speed))
-_register(LiveParam("coolant", "Coolant temp", "°C", "0105", 0x05, decode_temp_c))
-_register(LiveParam("iat", "Intake temp", "°C", "010F", 0x0F, decode_temp_c))
+_register(LiveParam("coolant", "Coolant temp", "°C", "0105", 0x05, decode_temp_c, 0x110, decode_scrambler_coolant))
+_register(LiveParam("iat", "Intake temp", "°C", "010F", 0x0F, decode_temp_c, 0x110, decode_scrambler_coolant))
 _register(LiveParam("tps", "Throttle", "%", "0111", 0x11, decode_percent, 0x081, decode_scrambler_tps))
 _register(LiveParam("load", "Engine load", "%", "0104", 0x04, decode_percent))
 _register(LiveParam("timing", "Timing adv.", "°", "010E", 0x0E, decode_timing))
@@ -137,7 +155,7 @@ _register(LiveParam("maf", "MAF", "g/s", "0110", 0x10, decode_maf))
 _register(LiveParam("mod_v", "Module voltage", "V", "0142", 0x42, decode_voltage_0142, 0x201, decode_scrambler_voltage))
 _register(LiveParam("runtime", "Run time", "s", "011F", 0x1F, decode_runtime))
 _register(LiveParam("fuel_lvl", "Fuel level", "%", "012F", 0x2F, decode_fuel_level))
-_register(LiveParam("batt_v", "Adapter voltage", "V", "ATRV", 0x00, lambda _d: None))
+_register(LiveParam("batt_v", "Adapter voltage", "V", "ATRV", 0x00, lambda _d: None, 0x201, decode_scrambler_voltage))
 
 
 def choices() -> List[Tuple[str, str]]:
@@ -162,29 +180,43 @@ def parse_atrv(text: str) -> Optional[float]:
 
 
 def can_payload(response: str, can_id: int) -> Optional[bytes]:
+    """Parse an ATMA dump. ATH1 may prefix the 11-bit ID; CRA-filtered dumps are 8 data bytes."""
     want = f"{can_id:03X}"
-    for line in response.replace(",", " ").splitlines():
+    named: Optional[bytes] = None
+    filtered: Optional[bytes] = None
+    for line in response.replace(",", " ").replace("|", "\n").splitlines():
         upper = line.strip().upper()
-        if not upper or upper.startswith("AT") or "STOPPED" in upper:
+        if not upper or upper.startswith("AT") or "STOPPED" in upper or "BUFFER" in upper:
+            continue
+        hex_only = "".join(ch for ch in upper if ch in "0123456789ABCDEF")
+        if len(hex_only) >= 19 and hex_only[:3] == want:
+            body = hex_only[3:]
+            if len(body) % 2 == 1:
+                body = body[:-1]
+            if len(body) >= 2:
+                try:
+                    named = bytes.fromhex(body[:16] if len(body) >= 16 else body)
+                    continue
+                except ValueError:
+                    pass
+        if len(hex_only) == 16:
+            try:
+                filtered = bytes.fromhex(hex_only)
+            except ValueError:
+                pass
             continue
         parts = upper.split()
-        if not parts:
-            continue
-        ident = parts[0].lstrip("0") or "0"
-        if ident.zfill(3)[-3:] != want:
-            hex_only = "".join(ch for ch in upper if ch in "0123456789ABCDEF")
-            if len(hex_only) >= 3 and hex_only[:3] == want:
-                try:
-                    return bytes.fromhex(hex_only[3:])
-                except ValueError:
-                    continue
-            continue
-        hex_bytes = []
-        for part in parts[1:]:
-            if all(ch in "0123456789ABCDEF" for ch in part) and len(part) % 2 == 0:
-                hex_bytes.append(part)
-        try:
-            return bytes.fromhex("".join(hex_bytes))
-        except ValueError:
-            continue
-    return None
+        if len(parts) >= 2:
+            ident = parts[0].lstrip("0") or "0"
+            if ident.zfill(3)[-3:] == want:
+                hex_bytes = []
+                for part in parts[1:]:
+                    if all(ch in "0123456789ABCDEF" for ch in part) and len(part) % 2 == 0:
+                        hex_bytes.append(part)
+                blob = "".join(hex_bytes)
+                if blob:
+                    try:
+                        named = bytes.fromhex(blob[:16] if len(blob) >= 16 else blob)
+                    except ValueError:
+                        pass
+    return named or filtered

@@ -8,5 +8,6 @@ venv/
 scripts/_probe_pi.py
 .idea/
 .vscode/
+logs/
 *.bak
 *.png

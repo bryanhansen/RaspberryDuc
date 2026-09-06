@@ -11,6 +11,7 @@ Python OBD-II diagnostic utility for a **2015 Ducati Scrambler Icon 800** (Conti
 - **Service** tab: oil and desmo service indicators, heated-grip ECU activation, and service interval
 - **Live** tab: four selectable live value panels, update rate (default 1 s), and Start/Stop
 - **About** tab: version, copyright (Bryan Hansen), scrollable GPLv3 license text
+- Optional ECU transaction logging via `raspberryduc.ini`
 
 ## Hardware
 
@@ -38,6 +39,18 @@ DISPLAY=:0 python3 /home/pi/RaspberryDuc/run.py
 Press **Escape** to quit fullscreen during development.
 
 A desktop launcher is in `scripts/raspberryduc.desktop`. Copy it to `~/.local/share/applications/` or `~/.config/autostart/` to start at login.
+
+## Logging (R20)
+
+ELM327 / ECU traffic is on by default. Edit `raspberryduc.ini` next to `run.py` to turn it off:
+
+```ini
+[logging]
+enabled = false
+directory = logs
+```
+
+Restart the app. A new file is created under `logs/` as `raspberryduc_YYYY_DD_MM_HH_MM_SS.log` if it does not already exist. At most five session logs are kept; the oldest is deleted on start. Connect and Disconnect each write an entry (device, baud rate, adapter, protocol). The same file records every TX command and RX response. Each line is flushed and fsynced so a power-off still keeps the log. You can also point at another ini with `RASPBERRYDUC_CONFIG=/path/to/file.ini`.
 
 ## Protocol notes
 

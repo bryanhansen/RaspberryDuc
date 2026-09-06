@@ -1,6 +1,6 @@
 import unittest
 
-from raspberryduc.dtc import decode_mode03, decode_uds_dtc, sae_code_from_bytes
+from raspberryduc.dtc import decode_mode03, decode_uds_dtc, negative_response, sae_code_from_bytes
 
 
 class DtcTests(unittest.TestCase):
@@ -13,6 +13,11 @@ class DtcTests(unittest.TestCase):
 
     def test_mode03_none(self):
         self.assertEqual(decode_mode03(bytes.fromhex("430000")), [])
+
+    def test_negative_response_not_dtc(self):
+        self.assertTrue(negative_response(bytes.fromhex("7F0311")))
+        self.assertEqual(decode_mode03(bytes.fromhex("7F0311")), [])
+        self.assertEqual(decode_mode03(bytes.fromhex("7F0711")), [])
 
     def test_uds_dtc(self):
         codes = decode_uds_dtc(bytes.fromhex("5902FF01330001"))
