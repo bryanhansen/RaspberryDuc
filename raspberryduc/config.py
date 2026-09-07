@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -18,7 +18,7 @@ LOG = logging.getLogger(__name__)
 CONFIG_FILENAME = "raspberryduc.ini"
 DEFAULT_LOG_DIR = "logs"
 MAX_SESSION_LOGS = 5
-LOG_STAMP_FORMAT = "%Y_%d_%m_%H_%M_%S"  # R20.4 YYYY_DD_MM_HH_MM_SS
+LOG_STAMP_FORMAT = "%Y_%d_%m_%H_%M_%S"  # R20.4: day then month, not ISO YYYY_MM_DD
 LOG_NAME_RE = re.compile(
     r"^raspberryduc_(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})\.log$"
 )
@@ -26,7 +26,7 @@ _TRUTH = {"1", "true", "yes", "on"}
 
 
 class DurableFileHandler(logging.FileHandler):
-    """Flush the stdio buffer and fsync after every record (hard power-off)."""
+    """Flush the stdio buffer and fsync after every record (Pi power-off)."""
 
     def flush(self) -> None:
         super().flush()
@@ -88,6 +88,7 @@ def parse_log_stamp(name: str) -> Optional[datetime]:
     match = LOG_NAME_RE.match(name)
     if not match:
         return None
+    # Filename is YYYY_DD_MM_…; datetime() argument order is year, month, day.
     year, day, month, hour, minute, second = (int(part) for part in match.groups())
     try:
         return datetime(year, month, day, hour, minute, second)
@@ -115,6 +116,34 @@ def prune_session_logs(directory: Path, keep: int = MAX_SESSION_LOGS) -> None:
             LOG.warning("Could not delete old log %s: %s", old, exc)
 
 
+def unique_session_log_path(directory: Path, stamp: datetime) -> Path:
+    """Never reuse a prior session file; bump the timestamp seconds if needed."""
+    candidate = directory / session_log_name(stamp)
+    guard = 0
+    while candidate.exists() and guard < 120:
+        stamp = stamp + timedelta(seconds=1)
+        candidate = directory / session_log_name(stamp)
+        guard += 1
+    if candidate.exists():
+        candidate = directory / session_log_name(stamp + timedelta(seconds=1))
+        n = 1
+        while candidate.exists():
+            n += 1
+            candidate = directory / f"{session_log_name(stamp)[:-4]}_{n}.log"
+    return candidate
+
+
+def _clear_package_file_handlers() -> None:
+    package = logging.getLogger("raspberryduc")
+    for handler in list(package.handlers):
+        if isinstance(handler, logging.FileHandler):
+            package.removeHandler(handler)
+            try:
+                handler.close()
+            except OSError:
+                pass
+
+
 def apply_logging(config: AppConfig, now: Optional[datetime] = None) -> Optional[Path]:
     """Create a new timestamped session log when logging is enabled (R20 / R20.1 / R20.3)."""
     if not config.logging_enabled:
@@ -125,10 +154,11 @@ def apply_logging(config: AppConfig, now: Optional[datetime] = None) -> Optional
     except OSError as exc:
         LOG.warning("Cannot create log directory %s: %s", log_dir, exc)
         return None
+    _clear_package_file_handlers()
+    # Drop the oldest before creating this session so prune cannot unlink the new file.
+    prune_session_logs(log_dir, max(0, MAX_SESSION_LOGS - 1))
     stamp = now or datetime.now()
-    log_path = log_dir / session_log_name(stamp)
-    if log_path.exists():
-        log_path = log_dir / session_log_name(stamp.replace(second=(stamp.second + 1) % 60))
+    log_path = unique_session_log_path(log_dir, stamp)
     handler = DurableFileHandler(log_path, mode="w", encoding="utf-8")
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(
@@ -140,14 +170,14 @@ def apply_logging(config: AppConfig, now: Optional[datetime] = None) -> Optional
     package = logging.getLogger("raspberryduc")
     package.setLevel(logging.DEBUG)
     package.addHandler(handler)
-    prune_session_logs(log_dir, MAX_SESSION_LOGS)
     src = config.config_path or "(defaults)"
     package.info(
-        "%s %s ECU transaction logging enabled (config=%s file=%s)",
+        "%s %s ECU transaction logging enabled (config=%s file=%s pid=%s)",
         APP_NAME,
         __version__,
         src,
         log_path,
+        os.getpid(),
     )
     return log_path
 

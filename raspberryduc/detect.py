@@ -1,4 +1,8 @@
-"""USB virtual COM port autodetection for ELM327 adapters."""
+"""USB virtual COM port autodetection for ELM327 adapters.
+
+The Pi adapter enumerates as FT232R (VID 0x0403), not a string containing ELM.
+Bluetooth RFCOMM and the Pi's onboard UART (ttyAMA0 / serial0) are skipped.
+"""
 
 from __future__ import annotations
 
@@ -125,6 +129,7 @@ def _looks_usb_vcp(device: str) -> bool:
 
 
 def _is_onboard_uart(device: str, blob: str) -> bool:
+    """Pi debug UART — not the USB ELM. Matching it hangs ATZ on the console port."""
     name = os.path.basename(device).lower()
     if name in {"ttyama0", "ttyama10", "serial0", "serial1", "ttyS0"}:
         return True
@@ -132,6 +137,7 @@ def _is_onboard_uart(device: str, blob: str) -> bool:
 
 
 def _linux_usb_serial_globs() -> Iterable[str]:
+    # pyserial can miss a just-plugged FT232 until /dev/ttyUSB* is listed raw.
     if sys.platform != "linux":
         return []
     paths = []

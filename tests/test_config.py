@@ -81,6 +81,25 @@ class ConfigTests(unittest.TestCase):
                     handler.close()
                     package.removeHandler(handler)
 
+    def test_apply_logging_does_not_reuse_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            when = datetime(2026, 9, 6, 18, 18, 21)
+            prior = directory / session_log_name(when)
+            prior.write_text("prior-session\n", encoding="utf-8")
+            cfg = AppConfig(logging_enabled=True, log_dir=directory)
+            created = apply_logging(cfg, now=when)
+            self.assertIsNotNone(created)
+            assert created is not None
+            self.assertNotEqual(created, prior)
+            self.assertEqual(prior.read_text(encoding="utf-8"), "prior-session\n")
+            self.assertIn("ECU transaction logging enabled", created.read_text(encoding="utf-8"))
+            package = logging.getLogger("raspberryduc")
+            for handler in list(package.handlers):
+                if getattr(handler, "baseFilename", None) == str(created):
+                    handler.close()
+                    package.removeHandler(handler)
+
     def test_durable_handler_visible_without_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "t.log"

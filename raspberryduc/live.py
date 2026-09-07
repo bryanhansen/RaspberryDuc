@@ -1,4 +1,9 @@
-"""Live OBD-II / ISO 15765-4 value catalog and decoders."""
+"""Live OBD-II / ISO 15765-4 value catalog and decoders.
+
+Mode 01 formulas are SAE J1979 (cars). The Scrambler never answers them; the
+``can_id`` / ``can_decode`` fields are the M3C broadcast fallbacks used once
+``_ecu_seen`` is set. ATRV is adapter pin voltage, not an ECU DID.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,7 @@ class LiveParam:
     key: str
     label: str
     units: str
-    obd_cmd: str
+    obd_cmd: str  # ELM request, e.g. 010C or ATRV
     pid: int
     decode: Decoder
     can_id: Optional[int] = None
@@ -94,7 +99,7 @@ def decode_fuel_level(data: bytes) -> Optional[float]:
 
 
 def decode_scrambler_tps(frame: bytes) -> Optional[float]:
-    """CAN 0x081: 0x00-0xC8 is 0-100%. Byte 0, 1, or 4 depending on layout."""
+    """CAN 0x081. Observed idle ``00 01 …`` (byte1) and ``… C8 …`` (byte4 = 100%)."""
     if not frame:
         return None
     for idx in (0, 1, 4):
@@ -143,6 +148,7 @@ def _register(param: LiveParam) -> LiveParam:
     return param
 
 
+# Mode 01 command is kept for cars; can_id is what the Scrambler actually streams.
 _register(LiveParam("rpm", "Engine RPM", "rpm", "010C", 0x0C, decode_rpm, 0x100, decode_scrambler_rpm))
 _register(LiveParam("speed", "Vehicle speed", "km/h", "010D", 0x0D, decode_speed))
 _register(LiveParam("coolant", "Coolant temp", "°C", "0105", 0x05, decode_temp_c, 0x110, decode_scrambler_coolant))
@@ -180,7 +186,11 @@ def parse_atrv(text: str) -> Optional[float]:
 
 
 def can_payload(response: str, can_id: int) -> Optional[bytes]:
-    """Parse an ATMA dump. ATH1 may prefix the 11-bit ID; CRA-filtered dumps are 8 data bytes."""
+    """Parse ATMA text.
+
+    ATH1+ID: ``081`` + 16 hex data digits (or spaced). CRA-only dumps are exactly
+    16 hex chars with no ID — those were dropped before and live stayed blank.
+    """
     want = f"{can_id:03X}"
     named: Optional[bytes] = None
     filtered: Optional[bytes] = None

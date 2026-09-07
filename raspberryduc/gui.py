@@ -57,7 +57,11 @@ DEFAULT_PANEL_KEYS = ("rpm", "coolant", "tps", "batt_v")
 
 
 class TouchPicker(tk.Frame):
-    """On-screen chooser that stays inside the 480x320 display."""
+    """Fullscreen-safe chooser. Pi TFT leaves in-window Listbox overlays blank.
+
+    Options are tk.Button rows in an overrideredirect Toplevel so X11 paints a
+    real window. ``_block_until`` ignores the touch that closed the list.
+    """
 
     _open_picker: Optional["TouchPicker"] = None
 
@@ -66,7 +70,7 @@ class TouchPicker(tk.Frame):
         self._values = list(values)
         self._on_change = on_change
         self.var = tk.StringVar(value=initial)
-        self._overlay: Optional[tk.Frame] = None
+        self._overlay: Optional[tk.Toplevel] = None
         self._block_until = 0.0
         shell = tk.Frame(
             self,
@@ -74,7 +78,7 @@ class TouchPicker(tk.Frame):
             highlightbackground=SELECT_ARROW,
             highlightthickness=1,
         )
-        shell.pack(fill=tk.X)
+        shell.pack(fill=tk.BOTH, expand=True)
         tk.Button(
             shell,
             textvariable=self.var,
@@ -89,7 +93,7 @@ class TouchPicker(tk.Frame):
             anchor="w",
             padx=8,
             pady=3,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ).pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         arrow = tk.Label(
             shell,
             text="▾",
@@ -112,47 +116,91 @@ class TouchPicker(tk.Frame):
         if TouchPicker._open_picker is not None and TouchPicker._open_picker is not self:
             TouchPicker._open_picker._close()
         root = self.winfo_toplevel()
-        overlay = tk.Frame(root, bg=SELECT_ARROW, highlightthickness=0)
-        overlay.place(x=20, y=46, width=440, height=208)
-        overlay.lift()
-        frame = tk.Frame(overlay, bg=SELECT_BG)
-        frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
-        lb = tk.Listbox(
-            frame,
-            bg=SELECT_BG,
-            fg=SELECT_FG,
-            selectbackground=SELECT_HI,
-            selectforeground="#ffffff",
-            font=FONT,
-            activestyle="none",
+        root.update_idletasks()
+        pop = tk.Toplevel(root)
+        pop.transient(root)
+        pop.overrideredirect(True)
+        pop.configure(bg=SELECT_ARROW)
+        x = root.winfo_rootx() + 20
+        y = root.winfo_rooty() + 46
+        pop.geometry(f"440x220+{x}+{y}")
+        try:
+            pop.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        inner = tk.Frame(pop, bg=SELECT_BG)
+        inner.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
+        canvas = tk.Canvas(inner, bg=SELECT_BG, highlightthickness=0, bd=0)
+        vsb = tk.Scrollbar(
+            inner,
+            orient="vertical",
+            command=canvas.yview,
+            bg="#3a3a3a",
+            troughcolor="#111111",
+            activebackground=SELECT_HI,
             highlightthickness=0,
-            borderwidth=0,
-            exportselection=False,
         )
-        scroll = ttk.Scrollbar(frame, command=lb.yview)
-        lb.configure(yscrollcommand=scroll.set)
-        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        holder = tk.Frame(canvas, bg=SELECT_BG)
+        window = canvas.create_window((0, 0), window=holder, anchor="nw")
+
+        def sync(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0))
+            canvas.itemconfigure(window, width=max(1, canvas.winfo_width()))
+
+        holder.bind("<Configure>", sync)
+        canvas.bind("<Configure>", sync)
+        canvas.bind("<Button-4>", lambda _e: canvas.yview_scroll(-1, "units"))
+        canvas.bind("<Button-5>", lambda _e: canvas.yview_scroll(1, "units"))
         current = self.var.get()
-        for i, label in enumerate(self._values):
-            lb.insert(tk.END, label)
-            if label == current:
-                lb.selection_set(i)
-                lb.see(i)
-
-        def choose(event) -> str:
-            index = lb.nearest(event.y)
-            if 0 <= index < lb.size():
-                self.var.set(lb.get(index))
-                if self._on_change:
-                    self._on_change()
-            self._close()
-            return "break"
-
-        lb.bind("<ButtonRelease-1>", choose)
-        overlay.bind("<Escape>", lambda _e: self._close())
-        self._overlay = overlay
+        for label in self._values:
+            selected = label == current
+            tk.Button(
+                holder,
+                text=label,
+                command=lambda item=label: self._choose(item),
+                bg=SELECT_HI if selected else SELECT_BG,
+                fg="#ffffff" if selected else SELECT_FG,
+                activebackground=SELECT_HI,
+                activeforeground="#ffffff",
+                disabledforeground=SELECT_FG,
+                relief=tk.FLAT,
+                bd=0,
+                highlightthickness=1,
+                highlightbackground="#d8cdb8",
+                font=FONT,
+                anchor="w",
+                padx=12,
+                pady=7,
+            ).pack(fill=tk.X, pady=1, padx=2)
+        self._overlay = pop
         TouchPicker._open_picker = self
+        pop.bind("<Escape>", lambda _e: self._close())
+        pop.update_idletasks()
+        pop.lift()
+        try:
+            pop.focus_force()
+        except tk.TclError:
+            pass
+        root.after_idle(lambda: self._raise_overlay())
+
+    def _raise_overlay(self) -> None:
+        pop = self._overlay
+        if pop is None:
+            return
+        try:
+            pop.lift()
+            pop.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _choose(self, label: str) -> None:
+        self.var.set(label)
+        if self._on_change:
+            self._on_change()
+        self._close()
 
     def _close(self) -> None:
         self._block_until = time.monotonic() + 0.45
@@ -163,7 +211,6 @@ class TouchPicker(tk.Frame):
         if overlay is None:
             return
         try:
-            overlay.place_forget()
             overlay.destroy()
         except tk.TclError:
             pass
@@ -249,10 +296,17 @@ class RaspberryDucApp(tk.Tk):
         self._rt_stop = threading.Event()
         self._rt_thread: Optional[threading.Thread] = None
         self._last_live: Dict[str, Optional[float]] = {}
+        self._paint_pending = False
 
         self._apply_style()
         self._build()
         self._set_disconnected()
+        self.bind("<Map>", self._on_mapped, add="+")
+        self.bind("<FocusIn>", lambda _e: self._force_paint(), add="+")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed, add="+")
+        self.after_idle(self._force_paint)
+        self.after(120, self._force_paint)
+        self.after(400, self._force_paint)
 
     def _apply_style(self) -> None:
         style = ttk.Style(self)
@@ -409,6 +463,36 @@ class RaspberryDucApp(tk.Tk):
         self._build_service()
         self._build_realtime()
         self._build_about()
+
+    def _on_mapped(self, _event=None) -> None:
+        self._force_paint()
+
+    def _on_tab_changed(self, _event=None) -> None:
+        if TouchPicker._open_picker is not None:
+            TouchPicker._open_picker._close()
+        self._force_paint()
+        self.after(80, self._force_paint)
+
+    def _force_paint(self, _event=None) -> None:
+        """Queue a geometry flush. Small TFTs often need an expose after tab/connect."""
+        if self._paint_pending:
+            return
+        self._paint_pending = True
+        self.after_idle(self._do_paint)
+
+    def _do_paint(self) -> None:
+        self._paint_pending = False
+        try:
+            self.update_idletasks()
+            notebook = getattr(self, "notebook", None)
+            if notebook is not None:
+                notebook.update_idletasks()
+                current = notebook.select()
+                if current:
+                    notebook.nametowidget(current).update_idletasks()
+            self.update_idletasks()
+        except tk.TclError:
+            pass
 
     def _build_main(self) -> None:
         header = tk.Label(
@@ -746,6 +830,8 @@ class RaspberryDucApp(tk.Tk):
         self.note_var.set(snap.notes)
         self._set_realtime_controls()
         self._apply_service(snap.service, elm_connected=True)
+        self._force_paint()
+        self.after(80, self._force_paint)
 
     def _on_disconnected(self, _result, error: Optional[BaseException]) -> None:
         self._set_disconnected()
@@ -764,6 +850,7 @@ class RaspberryDucApp(tk.Tk):
         self._set_realtime_controls()
         self._reset_service_panel()
         self._schedule_scan(200)
+        self._force_paint()
 
     def _set_status(self, text: str, color: str) -> None:
         self.status_text.configure(text=text)
@@ -931,6 +1018,7 @@ class RaspberryDucApp(tk.Tk):
                     keys.append(key)
             results: Dict[str, Optional[float]] = {}
             try:
+                # One ELM VCP: connect/disconnect and live polls must not overlap.
                 with self._lock:
                     if not self.session.connected:
                         raise ElmError("disconnected")

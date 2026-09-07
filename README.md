@@ -54,9 +54,7 @@ Restart the app. A new file is created under `logs/` as `raspberryduc_YYYY_DD_MM
 
 ## Protocol notes
 
-The M3C is addressed as a standard ISO 15765-4 diagnostic server (`7E0`/`7E8`, then `7E1`/`7E9`). VIN is requested with OBD Mode 09 PID 02, then UDS DID `F190`. Faults use Mode 03 / 07, then UDS `19 02 FF`. Service status is read with UDS maintenance DIDs, then CAN ID `0x201` (ECU→dash warning bits).
-
-The Scrambler does not always implement passenger-car Mode 01 PIDs. Realtime values first use ISO 15765-4 Mode 01, then fall back to known M3C CAN frames (RPM, throttle, voltage) when needed. If the ELM327 connects but no VIN is returned, the Main tab shows **No vehicle detected** and Realtime Start stays disabled.
+The M3C is **KWP2000 on ISO 15765-4 CAN 11-bit 500 kbit/s**, not a passenger-car UDS server. Physical addressing that works is tester **7E1** / ECU **7E9**. Session `1003` returns `5003`. VIN is **KWP `1A90`** over raw ISO-TP (CAF off); Mode 09 `0902` and UDS `22F190` do not. Three-byte UDS (`22…`, `1902FF`) returns NRC `0x13`. Live values use broadcast CAN (`0x081` throttle, `0x100` RPM, `0x201` voltage) and ATRV, not Mode 01. If the ELM327 connects but no VIN is returned, the Main tab shows **No vehicle detected** and Live Start stays disabled.
 
 ## License
 

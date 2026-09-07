@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-__version__ = "0.5.9"
+__version__ = "0.5.10"
 APP_NAME = "RaspberryDuc"
 APP_TITLE = "Ducati Scrambler OBD-II"
 COPYRIGHT = "Copyright (C) 2026 Bryan Hansen"

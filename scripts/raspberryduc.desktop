@@ -2,6 +2,7 @@
 Type=Application
 Name=RaspberryDuc
 Comment=Ducati Scrambler OBD-II diagnostic utility
+# Session autostart provides DISPLAY=:0. Headless SSH must set DISPLAY and XAUTHORITY.
 Exec=/usr/bin/python3 /home/pi/RaspberryDuc/run.py
 Path=/home/pi/RaspberryDuc
 Icon=utilities-system-monitor

@@ -56,7 +56,11 @@ def u16(data: bytes, offset: int = 0) -> Optional[int]:
 
 
 def parse_packed_service(data: bytes) -> Optional[Tuple[int, int, int]]:
-    """oil remaining, desmo remaining, interval (km) as three big-endian u16s."""
+    """oil remaining, desmo remaining, interval (km) as three big-endian u16s.
+
+    M3C UDS 0x22 DIDs currently return NRC 0x13, so this path is unused until
+    a KWP local-ID equivalent is found. CAN 0x201 is the live fallback.
+    """
     if len(data) < 6:
         return None
     oil = u16(data, 0)

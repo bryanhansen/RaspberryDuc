@@ -91,6 +91,7 @@ class FaultCode:
 
 
 def sae_code_from_bytes(b0: int, b1: int) -> str:
+    """Two-byte ISO 15031 packing: high nibble of b0 selects P/C/B/U."""
     prefix = _FIRST_LETTER[(b0 >> 4) & 0xF]
     return f"{prefix}{b0 & 0x0F:X}{b1:02X}"
 
@@ -100,7 +101,7 @@ def describe(code: str) -> str:
 
 
 def decode_mode03(payload: bytes) -> List[FaultCode]:
-    """Parse ISO 15031-5 mode $03/$07 CAN payload (SID already stripped)."""
+    """ISO 15031-5 $03/$07. Reject SID 0x7F so ``7F 03 11`` is not P0133."""
     if negative_response(payload):
         return []
     data = _strip_sid(payload, (0x43, 0x47))
@@ -127,7 +128,7 @@ def decode_uds_dtc(payload: bytes) -> List[FaultCode]:
     if data and data[0] == 0x02:
         data = data[1:]
     if data:
-        data = data[1:]  # status availability mask
+        data = data[1:]  # DTCStatusAvailabilityMask; records are then 3+status
     codes: List[FaultCode] = []
     for i in range(0, len(data) - 3, 4):
         hi, mid, lo, status = data[i], data[i + 1], data[i + 2], data[i + 3]
@@ -148,7 +149,7 @@ def decode_uds_dtc(payload: bytes) -> List[FaultCode]:
 
 
 def negative_response(payload: bytes) -> bool:
-    """True for ISO 14229 / ISO 15031 negative responses (SID 0x7F)."""
+    """ISO 14229/15031 NRC (SID 0x7F). Service-not-supported is 0x11, not a DTC."""
     return bool(payload) and payload[0] == 0x7F
 
 

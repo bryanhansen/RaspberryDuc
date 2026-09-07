@@ -1,4 +1,16 @@
-"""ISO 11898 / ISO 15765-4 session for the Continental M3C ECU."""
+"""ISO 11898 / ISO 15765-4 session for the 2015 Scrambler Continental M3C.
+
+What the ECU actually speaks (confirmed on a live bike):
+- Physical: ISO 15765-4 CAN 11-bit 500 kbit/s (ELM ATSP6). Mode 01 ``0100`` is
+  NO DATA; the bus is still up.
+- Addressing: tester 7E1 / ECU 7E9 (7E0/7E8 is silent).
+- Session: KWP ``1003`` → ``5003``. Three-byte UDS (``22F190``, ``1902FF``)
+  returns NRC 0x13 (incorrect message length).
+- VIN: KWP ``1A90`` over raw ISO-TP → ``5A 90`` + ASCII
+  (example ZDMK100AAFB002933).
+- Live data: no Mode 01 PIDs. Broadcast CAN (0x081 TPS, 0x100 RPM, 0x201 volts)
+  plus ATRV for adapter voltage.
+"""
 
 from __future__ import annotations
 
@@ -70,6 +82,7 @@ class M3CSession:
         self.elm = Elm327()
         self.info: Optional[ConnectionInfo] = None
         self.snapshot = VehicleSnapshot()
+        # M3C physical IDs; 7E0/7E8 is tried only if VIN at 7E1 fails.
         self._diag_tx = "7E1"
         self._diag_rx = "7E9"
         self._ecu_seen = False
@@ -167,6 +180,7 @@ class M3CSession:
         return snap
 
     def read_live(self, key: str) -> Optional[float]:
+        """Mode 01 first only on a silent KWP ECU; otherwise CAN/ATRV."""
         if key == NONE_KEY or key not in LIVE_PARAMS:
             return None
         param = LIVE_PARAMS[key]
@@ -176,6 +190,8 @@ class M3CSession:
             if volts is not None:
                 return volts
         elif not self._ecu_seen:
+            # Passenger-car PIDs. Skip once KWP has answered — 010C etc. are NO DATA
+            # and leave STOPPED in the adapter.
             raw = self.elm.command(param.obd_cmd, timeout=0.5)
             if not response_failed(raw):
                 data = mode01_payload(parse_hex_bytes(raw), param.pid)
@@ -201,6 +217,7 @@ class M3CSession:
         frame = can_payload(sniffed, can_id)
         self._can_cache[can_id] = (now, frame)
         try:
+            # ATMA used ATCRA<id>; put 7E1/7E9 back for the next diagnostic command.
             self._address_ecu(self._diag_tx, self._diag_rx)
         except Exception:
             pass
@@ -213,6 +230,8 @@ class M3CSession:
         for code, name in ISO15765_PROTOCOLS:
             try:
                 self.elm.configure_iso15765(code)
+                # 0100 is a bus presence probe, not an M3C PID. NO DATA + ISO 15765-4
+                # (CAN 11/500) is the expected happy path.
                 probe = self.elm.command("0100", timeout=3.0)
                 reported = self.elm.protocol_name()
                 label = f"{name} [{reported}]"
@@ -242,12 +261,13 @@ class M3CSession:
         raise ElmError(f"ISO 15765-4 not established: {last_error}")
 
     def _ping_ecu(self) -> bool:
+        """Mode 01 0100. False on the M3C; VIN/NRC is the real presence check."""
         resp = self.elm.command("0100", timeout=2.5)
         data = parse_hex_bytes(resp)
         return bool(data) and not response_failed(resp)
 
     def _read_vin(self) -> Tuple[str, str]:
-        # ISO 15031-5 / SAE J1979 Mode 09 PID 02 (VIN)
+        # Mode 09 PID 02 is SAE J1979; this ECU ignores it (NO DATA).
         self._ecu_seen = False
         raw = self.elm.command("0902", timeout=4.0)
         vin = _vin_from_mode09(parse_hex_bytes(raw))
@@ -255,7 +275,7 @@ class M3CSession:
         if vin:
             self._ecu_seen = True
             return vin, "OBD Mode 09 PID 02"
-        # ISO 14229 UDS ReadDataByIdentifier 0xF190 over ISO 15765-4
+        # 7E1 then 7E0. 1003 is KWP/UDS diagnostic session, not a VIN read.
         for tx, rx in PHYS_ADDRS_11BIT:
             try:
                 self._address_ecu(tx, rx)
@@ -265,7 +285,7 @@ class M3CSession:
                 sess_ok = parse_hex_bytes(session)[:1] == b"\x50"
                 if sess_ok:
                     self._diag_tx, self._diag_rx = tx, rx
-                # 2-byte KWP2000 reads: 3-byte UDS 22/19 all returned NRC 0x13 on the M3C.
+                # Do not send 22F190 here: M3C NRC 0x13. 1A90/1A91 are 2-byte KWP.
                 for cmd in ("1A90", "1A91"):
                     if cmd in ("1A90", "1A91"):
                         payload = self.elm.isotp_request(cmd, timeout=3.0)
@@ -294,6 +314,7 @@ class M3CSession:
 
     def _note_ecu(self, raw) -> None:
         data = raw if isinstance(raw, (bytes, bytearray)) else parse_hex_bytes(str(raw))
+        # 0x7F NRC still proves a tester is talking to this address.
         if data and (data[0] == 0x7F or 0x40 <= data[0] <= 0x7E):
             self._ecu_seen = True
 
@@ -303,6 +324,7 @@ class M3CSession:
             try:
                 self._address_ecu(self._diag_tx, self._diag_rx)
                 self.elm.command("1003", timeout=1.0)
+                # KWP read-DTC variants; 1902FF is 3-byte UDS and gets 0x13 here.
                 for cmd in ("1800", "17FF", "13"):
                     raw = self.elm.command(cmd, timeout=2.5)
                     self._note_ecu(raw)
@@ -335,6 +357,7 @@ class M3CSession:
         return unique_codes(faults)
 
     def _address_ecu(self, tx: str, rx: str) -> None:
+        """ATSH = tester request ID, ATCRA = accept only the ECU response ID."""
         self.elm.command(f"ATSH{tx}", timeout=1.0)
         self.elm.command(f"ATCRA{rx}", timeout=1.0)
 
@@ -344,6 +367,7 @@ class M3CSession:
             snap.notes = "No vehicle detected."
             return snap
         try:
+            # Re-enter extended session; 0x22 DIDs below usually NRC 0x13 on M3C.
             self.elm.command("1003", timeout=0.6)
         except Exception:
             pass
@@ -402,6 +426,7 @@ class M3CSession:
         return snap
 
     def _uds_read_did(self, did: int) -> Optional[bytes]:
+        """SID 0x22 ReadDataByIdentifier. M3C typically replies 7F 22 13."""
         cmd = f"22{did:04X}"
         try:
             self._address_ecu(self._diag_tx, self._diag_rx)
@@ -418,6 +443,7 @@ class M3CSession:
 
 
 def _nrc_is(raw: str, code: int) -> bool:
+    """Negative response: 7F <sid> <nrc>. 0x13 = incorrectMessageLengthOrInvalidFormat."""
     data = parse_hex_bytes(raw)
     return len(data) >= 3 and data[0] == 0x7F and data[2] == code
 
@@ -439,7 +465,7 @@ def _vin_from_kwp(payload: bytes) -> str:
     if data[:1] in (b"\x5A", b"\x61"):
         data = data[1:]
         if data:
-            data = data[1:]
+            data = data[1:]  # local ID (0x90 for VIN)
     ascii_bytes = bytearray(b for b in data if 32 <= b < 127)
     text = bytes(ascii_bytes).decode("ascii", "ignore").replace("\x00", "").strip()
     match = VIN_RE.search(text.replace(" ", ""))
